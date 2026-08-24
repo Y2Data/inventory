@@ -16,6 +16,7 @@ const CreateBoxSchema = z.object({
 
 const UpdateBoxSchema = z.object({
   id: z.uuid(),
+  code: z.string().min(1).max(40).optional(),
   status: z.enum(["open", "sealed", "archived"]).optional(),
   name: z.string().max(120).optional(),
   location: z.string().max(160).optional(),
@@ -88,7 +89,16 @@ export async function PATCH(request: Request) {
         { status: 400 },
       );
     }
-    const box = await updateBox(parsed.data);
+    const code = parsed.data.code
+      ? normalizeBoxCode(parsed.data.code)
+      : undefined;
+    if (parsed.data.code !== undefined && !code) {
+      return Response.json(
+        { error: "invalid_code", message: "箱号只能使用字母、数字、横线或下划线" },
+        { status: 400 },
+      );
+    }
+    const box = await updateBox({ ...parsed.data, code });
     if (!box) {
       return Response.json(
         { error: "not_found", message: "没有找到这个箱子" },
@@ -97,6 +107,12 @@ export async function PATCH(request: Request) {
     }
     return Response.json({ box });
   } catch (error) {
+    if (error instanceof Error && /unique|duplicate/i.test(error.message)) {
+      return Response.json(
+        { error: "duplicate_code", message: "这个箱号已经存在" },
+        { status: 409 },
+      );
+    }
     return serverError(error);
   }
 }

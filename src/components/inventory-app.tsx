@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
   PackageCheck,
   PackageOpen,
+  Pencil,
   Plus,
   Printer,
   ScanLine,
@@ -38,6 +39,10 @@ import type {
 } from "@/lib/types";
 
 type Tab = "overview" | "scan" | "inventory" | "boxes";
+
+type BoxDialog =
+  | { mode: "create" }
+  | { mode: "edit"; boxId: string };
 
 const EMPTY_SUMMARY: InventorySummary = {
   totalItems: 0,
@@ -106,8 +111,13 @@ export function InventoryApp() {
     message: string;
     tone: "success" | "error";
   } | null>(null);
-  const [createBoxOpen, setCreateBoxOpen] = useState(false);
-  const [boxForm, setBoxForm] = useState({ code: "", name: "", location: "" });
+  const [boxDialog, setBoxDialog] = useState<BoxDialog | null>(null);
+  const [boxForm, setBoxForm] = useState({
+    code: "",
+    name: "",
+    location: "",
+    notes: "",
+  });
   const [savingBox, setSavingBox] = useState(false);
   const [query, setQuery] = useState("");
   const [boxFilter, setBoxFilter] = useState("");
@@ -183,31 +193,75 @@ export function InventoryApp() {
       code: `BOOK-${String(nextNumber).padStart(3, "0")}`,
       name: "",
       location: "",
+      notes: "",
     });
-    setCreateBoxOpen(true);
+    setBoxDialog({ mode: "create" });
   }
 
-  async function createBox(event: FormEvent<HTMLFormElement>) {
+  function openEditBox(box: InventoryBox) {
+    setBoxForm({
+      code: box.code,
+      name: box.name,
+      location: box.location,
+      notes: box.notes,
+    });
+    setBoxDialog({ mode: "edit", boxId: box.id });
+  }
+
+  async function saveBox(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!boxDialog) return;
+    const dialog = boxDialog;
     setSavingBox(true);
     try {
       const response = await fetch("/api/boxes", {
-        method: "POST",
+        method: dialog.mode === "create" ? "POST" : "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(boxForm),
+        body: JSON.stringify(
+          dialog.mode === "create"
+            ? boxForm
+            : { id: dialog.boxId, ...boxForm },
+        ),
       });
       const payload = await readPayload<{ box: InventoryBox }>(response);
-      setBoxes((current) => [payload.box, ...current]);
-      setSummary((current) => ({
-        ...current,
-        totalBoxes: current.totalBoxes + 1,
-        openBoxes: current.openBoxes + 1,
-      }));
-      setActiveBoxId(payload.box.id);
-      setCreateBoxOpen(false);
-      showNotice(`${payload.box.code} 已创建`);
+      if (dialog.mode === "create") {
+        setBoxes((current) => [payload.box, ...current]);
+        setSummary((current) => ({
+          ...current,
+          totalBoxes: current.totalBoxes + 1,
+          openBoxes: current.openBoxes + 1,
+        }));
+        setActiveBoxId(payload.box.id);
+        showNotice(`${payload.box.code} 已创建`);
+      } else {
+        setBoxes((current) =>
+          current.map((box) =>
+            box.id === payload.box.id ? payload.box : box,
+          ),
+        );
+        setItems((current) =>
+          current.map((item) =>
+            item.boxId === payload.box.id
+              ? {
+                  ...item,
+                  boxCode: payload.box.code,
+                  boxName: payload.box.name,
+                }
+              : item,
+          ),
+        );
+        showNotice(`${payload.box.code} 的信息已更新`);
+      }
+      setBoxDialog(null);
     } catch (error) {
-      showNotice(error instanceof Error ? error.message : "创建失败", "error");
+      showNotice(
+        error instanceof Error
+          ? error.message
+          : dialog.mode === "create"
+            ? "创建失败"
+            : "保存失败",
+        "error",
+      );
     } finally {
       setSavingBox(false);
     }
@@ -616,6 +670,9 @@ export function InventoryApp() {
                             <PackageOpen size={17} /> 重新打开
                           </button>
                         )}
+                        <button className="button ghost icon-only" type="button" onClick={() => openEditBox(box)} aria-label={`编辑 ${box.code}`}>
+                          <Pencil size={18} />
+                        </button>
                         <button className="button ghost icon-only" type="button" onClick={() => void printBoxLabel(box)} aria-label="打印标签">
                           <Printer size={18} />
                         </button>
@@ -647,20 +704,42 @@ export function InventoryApp() {
         })}
       </nav>
 
-      {createBoxOpen ? (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateBoxOpen(false)}>
-          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="new-box-title" onMouseDown={(event) => event.stopPropagation()}>
+      {boxDialog ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setBoxDialog(null)}>
+          <section className="modal" role="dialog" aria-modal="true" aria-labelledby="box-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
             <div className="modal-head">
-              <div><p className="eyebrow">NEW CONTAINER</p><h2 id="new-box-title">新建书箱</h2></div>
-              <button className="icon-button" type="button" onClick={() => setCreateBoxOpen(false)} aria-label="关闭"><X size={20} /></button>
+              <div>
+                <p className="eyebrow">{boxDialog.mode === "create" ? "NEW CONTAINER" : "BOX DETAILS"}</p>
+                <h2 id="box-dialog-title">{boxDialog.mode === "create" ? "新建书箱" : `编辑 ${boxForm.code}`}</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setBoxDialog(null)} aria-label="关闭"><X size={20} /></button>
             </div>
-            <form onSubmit={createBox} className="modal-form">
-              <label>箱号<input value={boxForm.code} onChange={(event) => setBoxForm({ ...boxForm, code: event.target.value })} placeholder="BOOK-001" required autoFocus /></label>
-              <label>名称（可选）<input value={boxForm.name} onChange={(event) => setBoxForm({ ...boxForm, name: event.target.value })} placeholder="技术书 / 小说 / 中文书" /></label>
-              <label>存放位置（可选）<input value={boxForm.location} onChange={(event) => setBoxForm({ ...boxForm, location: event.target.value })} placeholder="储藏室 A 架" /></label>
+            <form onSubmit={saveBox} className="modal-form">
+              <label>
+                箱号
+                <input
+                  value={boxForm.code}
+                  onChange={(event) => setBoxForm({ ...boxForm, code: event.target.value })}
+                  placeholder="BOOK-001"
+                  maxLength={40}
+                  required
+                  autoFocus
+                  aria-describedby={boxDialog.mode === "edit" ? "box-code-hint" : undefined}
+                />
+                {boxDialog.mode === "edit" ? (
+                  <small className="field-hint" id="box-code-hint">
+                    修改箱号后，请重新打印箱子标签。
+                  </small>
+                ) : null}
+              </label>
+              <label>名称（可选）<input value={boxForm.name} onChange={(event) => setBoxForm({ ...boxForm, name: event.target.value })} placeholder="技术书 / 小说 / 中文书" maxLength={120} /></label>
+              <label>存放位置（可选）<input value={boxForm.location} onChange={(event) => setBoxForm({ ...boxForm, location: event.target.value })} placeholder="储藏室 A 架" maxLength={160} /></label>
+              <label>备注（可选）<textarea value={boxForm.notes} onChange={(event) => setBoxForm({ ...boxForm, notes: event.target.value })} placeholder="记录箱内分类、摆放方式或其他提示" maxLength={2_000} rows={4} /></label>
               <div className="modal-actions">
-                <button className="button ghost" type="button" onClick={() => setCreateBoxOpen(false)}>取消</button>
-                <button className="button primary" type="submit" disabled={savingBox}>{savingBox ? "正在创建…" : "创建并设为当前箱子"}</button>
+                <button className="button ghost" type="button" onClick={() => setBoxDialog(null)}>取消</button>
+                <button className="button primary" type="submit" disabled={savingBox}>
+                  {savingBox ? "正在保存…" : boxDialog.mode === "create" ? "创建并设为当前箱子" : "保存更改"}
+                </button>
               </div>
             </form>
           </section>

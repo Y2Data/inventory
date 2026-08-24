@@ -199,6 +199,7 @@ export async function createBox(input: {
 
 export async function updateBox(input: {
   id: string;
+  code?: string;
   status?: BoxStatus;
   name?: string;
   location?: string;
@@ -210,9 +211,10 @@ export async function updateBox(input: {
       UPDATE inventory_boxes
       SET
         status = COALESCE($2, status),
-        name = COALESCE($3, name),
-        location = COALESCE($4, location),
-        notes = COALESCE($5, notes),
+        code = COALESCE($3, code),
+        name = COALESCE($4, name),
+        location = COALESCE($5, location),
+        notes = COALESCE($6, notes),
         sealed_at = CASE
           WHEN $2 = 'sealed' THEN COALESCE(sealed_at, NOW())
           WHEN $2 = 'open' THEN NULL
@@ -227,6 +229,7 @@ export async function updateBox(input: {
     [
       input.id,
       input.status ?? null,
+      input.code ?? null,
       input.name ?? null,
       input.location ?? null,
       input.notes ?? null,

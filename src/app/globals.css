@@ -348,10 +348,11 @@ a { color: inherit; text-decoration: none; }
 .scanner-layout { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(18rem, .75fr); gap: 1rem; align-items: start; }
 .scanner-main { padding: clamp(1.15rem, 2.5vw, 1.75rem); }
 .scanner-main .field-label { display: block; margin-bottom: .45rem; }
-.select, .modal-form input, .manual-card input {
+.select, .modal-form input, .modal-form textarea, .manual-card input {
   width: 100%; min-height: 2.85rem; border: 1px solid var(--line-dark); border-radius: 10px; background: white; color: var(--ink); padding: 0 .8rem; outline: 0;
 }
-.select:focus, .modal-form input:focus, .manual-card input:focus { border-color: #69a48b; box-shadow: 0 0 0 3px rgba(105,164,139,.13); }
+.modal-form textarea { min-height: 6.4rem; padding-block: .7rem; line-height: 1.5; resize: vertical; }
+.select:focus, .modal-form input:focus, .modal-form textarea:focus, .manual-card input:focus { border-color: #69a48b; box-shadow: 0 0 0 3px rgba(105,164,139,.13); }
 .camera-frame { min-height: clamp(19rem, 42vw, 34rem); margin-top: 1rem; border-radius: 16px; overflow: hidden; position: relative; background: #13231e; color: white; }
 .camera-frame video { width: 100%; height: 100%; min-height: inherit; display: block; object-fit: cover; }
 .camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; align-content: center; gap: .7rem; padding: 2rem; text-align: center; background: radial-gradient(circle at center, #1d3e32, #10241d); }
@@ -443,6 +444,7 @@ a { color: inherit; text-decoration: none; }
 .modal-head h2 { margin: 0; font-size: 1.28rem; letter-spacing: -.04em; }
 .modal-form { display: grid; gap: .9rem; }
 .modal-form label { display: grid; gap: .38rem; }
+.field-hint { color: var(--muted); font-size: .68rem; font-weight: 500; line-height: 1.45; }
 .modal-actions { display: flex; justify-content: flex-end; gap: .55rem; margin-top: .45rem; }
 .toast { position: fixed; z-index: 150; right: 1.4rem; bottom: 1.4rem; max-width: min(26rem, calc(100vw - 2rem)); border: 1px solid #9fcaa7; border-radius: 12px; background: #f0fff1; color: #205f3b; box-shadow: var(--shadow); padding: .75rem .9rem; display: flex; align-items: center; gap: .55rem; font-size: .78rem; font-weight: 700; animation: toast-in .2s ease-out; }
 .toast.error { border-color: #e2a49b; background: var(--red-bg); color: var(--red); }
