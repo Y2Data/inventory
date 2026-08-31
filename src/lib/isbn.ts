@@ -1,46 +1,12 @@
 import "server-only";
 
-import type { BookMetadata } from "@/lib/types";
+import type { ItemMetadata } from "@/lib/types";
+import { fetchJson, secureUrl } from "@/lib/http";
 
-export function normalizeIsbn(value: string) {
-  return value.replace(/[^0-9Xx]/g, "").toUpperCase();
-}
+export { normalizeIsbn, isValidIsbn } from "@/lib/barcode-format";
+import { normalizeIsbn, isValidIsbn } from "@/lib/barcode-format";
 
-export function isValidIsbn(value: string) {
-  const isbn = normalizeIsbn(value);
-  if (isbn.length === 13) {
-    if (!isbn.startsWith("978") && !isbn.startsWith("979")) return false;
-    const sum = isbn
-      .split("")
-      .reduce((total, digit, index) => total + Number(digit) * (index % 2 ? 3 : 1), 0);
-    return sum % 10 === 0;
-  }
-  if (isbn.length === 10) {
-    if (!/^\d{9}[\dX]$/.test(isbn)) return false;
-    const sum = isbn.split("").reduce((total, digit, index) => {
-      const number = digit === "X" ? 10 : Number(digit);
-      return total + number * (10 - index);
-    }, 0);
-    return sum % 11 === 0;
-  }
-  return false;
-}
-
-function secureUrl(value: unknown) {
-  return typeof value === "string" ? value.replace(/^http:/, "https:") : "";
-}
-
-async function fetchJson(url: string) {
-  const response = await fetch(url, {
-    cache: "no-store",
-    signal: AbortSignal.timeout(6_000),
-    headers: { "User-Agent": "DaiInventory/1.0" },
-  });
-  if (!response.ok) return null;
-  return response.json() as Promise<unknown>;
-}
-
-async function lookupOpenBd(isbn: string): Promise<BookMetadata | null> {
+async function lookupOpenBd(isbn: string): Promise<ItemMetadata | null> {
   try {
     const data = (await fetchJson(
       `https://api.openbd.jp/v1/get?isbn=${encodeURIComponent(isbn)}`,
@@ -52,16 +18,18 @@ async function lookupOpenBd(isbn: string): Promise<BookMetadata | null> {
 
     const author = typeof summary.author === "string" ? summary.author : "";
     return {
-      isbn,
+      barcode: isbn,
       title: String(summary.title),
       authors: author
         .split(/[;,／]/)
         .map((part) => part.trim())
         .filter(Boolean),
+      brand: "",
       publisher: typeof summary.publisher === "string" ? summary.publisher : "",
       publishedDate: typeof summary.pubdate === "string" ? summary.pubdate : "",
       coverUrl: secureUrl(summary.cover),
       language: "ja",
+      category: "",
       source: "openbd",
       raw: entry,
     };
@@ -70,7 +38,7 @@ async function lookupOpenBd(isbn: string): Promise<BookMetadata | null> {
   }
 }
 
-async function lookupGoogleBooks(isbn: string): Promise<BookMetadata | null> {
+async function lookupGoogleBooks(isbn: string): Promise<ItemMetadata | null> {
   try {
     const data = (await fetchJson(
       `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}`,
@@ -83,14 +51,16 @@ async function lookupGoogleBooks(isbn: string): Promise<BookMetadata | null> {
       ? volume.authors.map(String).filter(Boolean)
       : [];
     return {
-      isbn,
+      barcode: isbn,
       title: String(volume.title),
       authors,
+      brand: "",
       publisher: typeof volume.publisher === "string" ? volume.publisher : "",
       publishedDate:
         typeof volume.publishedDate === "string" ? volume.publishedDate : "",
       coverUrl: secureUrl(imageLinks?.thumbnail ?? imageLinks?.smallThumbnail),
       language: typeof volume.language === "string" ? volume.language : "",
+      category: "",
       source: "google-books",
       raw: volume,
     };
@@ -99,7 +69,7 @@ async function lookupGoogleBooks(isbn: string): Promise<BookMetadata | null> {
   }
 }
 
-async function lookupOpenLibrary(isbn: string): Promise<BookMetadata | null> {
+async function lookupOpenLibrary(isbn: string): Promise<ItemMetadata | null> {
   try {
     const key = `ISBN:${isbn}`;
     const data = (await fetchJson(
@@ -127,13 +97,15 @@ async function lookupOpenLibrary(isbn: string): Promise<BookMetadata | null> {
       : [];
     const cover = book.cover as Record<string, unknown> | undefined;
     return {
-      isbn,
+      barcode: isbn,
       title: String(book.title),
       authors,
+      brand: "",
       publisher: publishers[0] ?? "",
       publishedDate: typeof book.publish_date === "string" ? book.publish_date : "",
       coverUrl: secureUrl(cover?.medium ?? cover?.large ?? cover?.small),
       language: "",
+      category: "",
       source: "open-library",
       raw: book,
     };
@@ -142,7 +114,7 @@ async function lookupOpenLibrary(isbn: string): Promise<BookMetadata | null> {
   }
 }
 
-export async function lookupIsbn(value: string): Promise<BookMetadata | null> {
+export async function lookupIsbn(value: string): Promise<ItemMetadata | null> {
   const isbn = normalizeIsbn(value);
   if (!isValidIsbn(isbn)) return null;
 

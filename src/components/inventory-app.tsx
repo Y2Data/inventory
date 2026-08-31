@@ -9,14 +9,17 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleAlert,
+  CircleHelp,
   Download,
   Home,
+  ImagePlus,
   Library,
   LoaderCircle,
   Lock,
   LogOut,
   MapPin,
   MoreHorizontal,
+  Package,
   PackageCheck,
   PackageOpen,
   Pencil,
@@ -28,14 +31,17 @@ import {
   X,
 } from "lucide-react";
 import QRCode from "qrcode";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { upload } from "@vercel/blob/client";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { ScannerPanel } from "@/components/scanner-panel";
+import { BOX_CATEGORY_SUGGESTIONS, ITEM_CATEGORY_SUGGESTIONS } from "@/lib/categories";
 import type {
   ApiError,
   InventoryBox,
   InventoryItem,
   InventorySummary,
+  ItemKind,
 } from "@/lib/types";
 
 type Tab = "overview" | "scan" | "inventory" | "boxes";
@@ -43,6 +49,18 @@ type Tab = "overview" | "scan" | "inventory" | "boxes";
 type BoxDialog =
   | { mode: "create" }
   | { mode: "edit"; boxId: string };
+
+const KIND_LABEL: Record<ItemKind, string> = {
+  book: "书籍",
+  product: "物品",
+  unidentified: "待识别",
+};
+
+function KindIcon({ kind, size }: { kind: ItemKind; size: number }) {
+  if (kind === "book") return <BookOpen size={size} />;
+  if (kind === "product") return <Package size={size} />;
+  return <CircleHelp size={size} />;
+}
 
 const EMPTY_SUMMARY: InventorySummary = {
   totalItems: 0,
@@ -117,11 +135,26 @@ export function InventoryApp() {
     name: "",
     location: "",
     notes: "",
+    category: "",
   });
   const [savingBox, setSavingBox] = useState(false);
   const [query, setQuery] = useState("");
   const [boxFilter, setBoxFilter] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [needsReviewOnly, setNeedsReviewOnly] = useState(false);
   const [rowMenu, setRowMenu] = useState<string | null>(null);
+  const [itemDialog, setItemDialog] = useState<string | null>(null);
+  const [itemForm, setItemForm] = useState({
+    title: "",
+    authors: "",
+    brand: "",
+    publisher: "",
+    category: "",
+    notes: "",
+    imageUrl: "",
+  });
+  const [savingItem, setSavingItem] = useState(false);
+  const [uploadingItemPhoto, setUploadingItemPhoto] = useState(false);
 
   const activeBox = boxes.find((box) => box.id === activeBoxId) ?? null;
 
@@ -190,10 +223,11 @@ export function InventoryApp() {
         return match ? Math.max(max, Number(match[1])) : max;
       }, 0) + 1;
     setBoxForm({
-      code: `BOOK-${String(nextNumber).padStart(3, "0")}`,
+      code: `BOX-${String(nextNumber).padStart(3, "0")}`,
       name: "",
       location: "",
       notes: "",
+      category: "",
     });
     setBoxDialog({ mode: "create" });
   }
@@ -204,8 +238,76 @@ export function InventoryApp() {
       name: box.name,
       location: box.location,
       notes: box.notes,
+      category: box.category,
     });
     setBoxDialog({ mode: "edit", boxId: box.id });
+  }
+
+  function openEditItem(item: InventoryItem) {
+    setItemForm({
+      title: item.title,
+      authors: item.authors.join(", "),
+      brand: item.brand,
+      publisher: item.publisher,
+      category: item.category,
+      notes: item.notes,
+      imageUrl: item.imageUrl,
+    });
+    setItemDialog(item.id);
+    setRowMenu(null);
+  }
+
+  async function saveItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!itemDialog) return;
+    setSavingItem(true);
+    try {
+      const response = await fetch("/api/items", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: itemDialog,
+          title: itemForm.title,
+          authors: itemForm.authors
+            .split(/[;,，；]/)
+            .map((value) => value.trim())
+            .filter(Boolean),
+          brand: itemForm.brand,
+          publisher: itemForm.publisher,
+          category: itemForm.category,
+          notes: itemForm.notes,
+          imageUrl: itemForm.imageUrl,
+        }),
+      });
+      const payload = await readPayload<{ item: InventoryItem }>(response);
+      setItems((current) =>
+        current.map((entry) => (entry.id === payload.item.id ? payload.item : entry)),
+      );
+      showNotice(`${payload.item.title || "该物品"}已更新`);
+      setItemDialog(null);
+    } catch (error) {
+      showNotice(error instanceof Error ? error.message : "保存失败", "error");
+    } finally {
+      setSavingItem(false);
+    }
+  }
+
+  async function handleItemPhotoSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setUploadingItemPhoto(true);
+    try {
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/blob/upload",
+      });
+      setItemForm((current) => ({ ...current, imageUrl: blob.url }));
+    } catch {
+      showNotice("照片上传失败，请重试", "error");
+    } finally {
+      setUploadingItemPhoto(false);
+    }
   }
 
   async function saveBox(event: FormEvent<HTMLFormElement>) {
@@ -330,7 +432,7 @@ export function InventoryApp() {
   }
 
   async function removeItem(item: InventoryItem) {
-    if (!window.confirm(`从库存删除《${item.title}》？`)) return;
+    if (!window.confirm(`从库存删除《${item.title || "该物品"}》？`)) return;
     try {
       const response = await fetch("/api/items", {
         method: "DELETE",
@@ -373,11 +475,11 @@ export function InventoryApp() {
           img { width:44mm; height:44mm; }
           .footer { margin-top:8mm; font-size:10pt; color:#66706e; }
         </style></head><body>
-        <main><section><div class="kicker">DAI INVENTORY · BOOK BOX</div>
+        <main><section><div class="kicker">DAI INVENTORY · ${escapeHtml(box.category || "STORAGE BOX")}</div>
         <h1>${escapeHtml(box.code)}</h1>
-        <h2>${escapeHtml(box.name || "书籍")}</h2>
+        <h2>${escapeHtml(box.name || "未命名箱子")}</h2>
         <p>${escapeHtml(box.location || "位置待定")}</p>
-        <p>${box.itemCount} 本 · ${box.status === "sealed" ? "已封箱" : "装箱中"}</p>
+        <p>${box.itemCount} 件 · ${box.status === "sealed" ? "已封箱" : "装箱中"}</p>
         <div class="footer">顶部和侧面各贴一张；在应用扫码页扫描右侧标签可切换当前箱子。</div>
         </section><img src="${qrCode}" alt="${escapeHtml(box.code)} QR"></main>
         <script>window.onload=()=>setTimeout(()=>window.print(),250);<\/script>
@@ -393,16 +495,26 @@ export function InventoryApp() {
     window.location.replace("/login");
   }
 
+  const itemCategories = useMemo(() => {
+    const distinct = new Set(items.map((item) => item.category).filter(Boolean));
+    return Array.from(new Set([...ITEM_CATEGORY_SUGGESTIONS, ...distinct]));
+  }, [items]);
+
   const filteredItems = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     return items.filter((item) => {
       const matchesBox = !boxFilter || item.boxId === boxFilter;
       if (!matchesBox) return false;
+      const matchesCategory = !categoryFilter || item.category === categoryFilter;
+      if (!matchesCategory) return false;
+      if (needsReviewOnly && !item.needsReview) return false;
       if (!normalizedQuery) return true;
       return [
         item.title,
         item.barcode,
         item.publisher,
+        item.brand,
+        item.category,
         item.authors.join(" "),
         item.boxCode ?? "",
       ]
@@ -410,7 +522,7 @@ export function InventoryApp() {
         .toLocaleLowerCase()
         .includes(normalizedQuery);
     });
-  }, [boxFilter, items, query]);
+  }, [boxFilter, categoryFilter, items, needsReviewOnly, query]);
 
   if (loading) {
     return (
@@ -527,7 +639,7 @@ export function InventoryApp() {
                   <input
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
-                    placeholder="搜索书名、作者、ISBN 或箱号"
+                    placeholder="搜索名称、作者/品牌、条码或箱号"
                     aria-label="搜索库存"
                   />
                   {query ? (
@@ -547,6 +659,24 @@ export function InventoryApp() {
                     <option key={box.id} value={box.id}>{box.code}</option>
                   ))}
                 </select>
+                <select
+                  className="select compact-select"
+                  value={categoryFilter}
+                  onChange={(event) => setCategoryFilter(event.target.value)}
+                  aria-label="按分类筛选"
+                >
+                  <option value="">全部分类</option>
+                  {itemCategories.map((category) => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={`button ${needsReviewOnly ? "active-choice" : "secondary"}`}
+                  onClick={() => setNeedsReviewOnly((current) => !current)}
+                >
+                  只看待识别
+                </button>
                 <a className="button secondary export-button" href="/api/export">
                   <Download size={17} /> 导出
                 </a>
@@ -559,29 +689,39 @@ export function InventoryApp() {
                   {filteredItems.map((item) => (
                     <article className="book-row" key={item.id}>
                       <div className="book-cover">
-                        {item.coverUrl ? (
+                        {item.imageUrl || item.coverUrl ? (
                           // eslint-disable-next-line @next/next/no-img-element
-                          <img src={item.coverUrl} alt="" loading="lazy" />
+                          <img src={item.imageUrl || item.coverUrl} alt="" loading="lazy" />
                         ) : (
-                          <BookOpen size={25} />
+                          <KindIcon kind={item.kind} size={25} />
                         )}
                       </div>
                       <div className="book-main">
-                        <h3>{item.title}</h3>
-                        <p>{item.authors.join("、") || "作者未知"}</p>
+                        <div className="book-title-row">
+                          <h3>{item.title || "待识别的物品"}</h3>
+                          {item.needsReview ? (
+                            <span className="status-pill amber">待识别</span>
+                          ) : null}
+                        </div>
+                        <p>{item.authors.join("、") || item.brand || "信息待补充"}</p>
                         <div className="book-meta-mobile">
-                          <span>{item.barcode}</span>
-                          <span>{item.publisher || "出版社未知"}</span>
+                          <span>{item.barcode || "无条码"}</span>
+                          <span>{item.publisher || item.category || "分类未知"}</span>
+                        </div>
+                        <div className="book-tags">
+                          <span className="tag-pill">{KIND_LABEL[item.kind]}</span>
+                          {item.category ? <span className="tag-pill">{item.category}</span> : null}
                         </div>
                       </div>
                       <div className="book-isbn">
-                        <small>ISBN</small><span>{item.barcode}</span>
+                        <small>{item.kind === "book" ? "ISBN" : "条码"}</small>
+                        <span>{item.barcode || "—"}</span>
                       </div>
                       <div className="book-location">
                         <select
                           value={item.boxId ?? ""}
                           onChange={(event) => void moveItem(item, event.target.value)}
-                          aria-label={`移动 ${item.title}`}
+                          aria-label={`移动 ${item.title || "该物品"}`}
                         >
                           <option value="">未装箱</option>
                           {boxes.map((box) => (
@@ -606,6 +746,9 @@ export function InventoryApp() {
                         </button>
                         {rowMenu === item.id ? (
                           <div className="row-menu">
+                            <button type="button" className="neutral" onClick={() => openEditItem(item)}>
+                              <Pencil size={16} /> 编辑信息
+                            </button>
                             <button type="button" onClick={() => void removeItem(item)}>
                               <Trash2 size={16} /> 删除记录
                             </button>
@@ -618,9 +761,17 @@ export function InventoryApp() {
               ) : (
                 <EmptyState
                   icon={BookOpen}
-                  title="没有找到书籍"
-                  body={query || boxFilter ? "换个搜索条件试试。" : "先扫描第一本书。"}
-                  actionLabel={!query && !boxFilter ? "开始扫码" : undefined}
+                  title="没有找到物品"
+                  body={
+                    query || boxFilter || categoryFilter || needsReviewOnly
+                      ? "换个搜索条件试试。"
+                      : "先扫描或拍照录入第一件物品。"
+                  }
+                  actionLabel={
+                    !query && !boxFilter && !categoryFilter && !needsReviewOnly
+                      ? "开始扫码"
+                      : undefined
+                  }
                   onAction={() => setTab("scan")}
                 />
               )}
@@ -646,11 +797,11 @@ export function InventoryApp() {
                         </span>
                       </div>
                       <div>
-                        <p className="eyebrow">BOOK BOX</p>
+                        <p className="eyebrow">{box.category || "INVENTORY BOX"}</p>
                         <h3>{box.code}</h3>
-                        <p className="box-name">{box.name || "未命名书箱"}</p>
+                        <p className="box-name">{box.name || "未命名箱子"}</p>
                       </div>
-                      <div className="box-count"><strong>{box.itemCount}</strong><span>本书</span></div>
+                      <div className="box-count"><strong>{box.itemCount}</strong><span>件物品</span></div>
                       <div className="box-location"><MapPin size={15} /> {box.location || "未设置位置"}</div>
                       <div className="box-actions">
                         {box.status === "open" ? (
@@ -686,7 +837,7 @@ export function InventoryApp() {
                   ))}
                 </div>
               ) : (
-                <EmptyState icon={Boxes} title="还没有箱子" body="先建立 BOOK-001，然后开始扫码装箱。" actionLabel="建立第一个箱子" onAction={openCreateBox} />
+                <EmptyState icon={Boxes} title="还没有箱子" body="先建立第一个箱子，然后开始扫码装箱。" actionLabel="建立第一个箱子" onAction={openCreateBox} />
               )}
             </section>
           ) : null}
@@ -720,7 +871,7 @@ export function InventoryApp() {
                 <input
                   value={boxForm.code}
                   onChange={(event) => setBoxForm({ ...boxForm, code: event.target.value })}
-                  placeholder="BOOK-001"
+                  placeholder="BOX-001"
                   maxLength={40}
                   required
                   autoFocus
@@ -732,13 +883,139 @@ export function InventoryApp() {
                   </small>
                 ) : null}
               </label>
-              <label>名称（可选）<input value={boxForm.name} onChange={(event) => setBoxForm({ ...boxForm, name: event.target.value })} placeholder="技术书 / 小说 / 中文书" maxLength={120} /></label>
+              <label>名称（可选）<input value={boxForm.name} onChange={(event) => setBoxForm({ ...boxForm, name: event.target.value })} placeholder="技术书 / 数据线 / 混装" maxLength={120} /></label>
+              <label>
+                分类（可选，仅供筛选，不限制箱内物品）
+                <input
+                  value={boxForm.category}
+                  onChange={(event) => setBoxForm({ ...boxForm, category: event.target.value })}
+                  placeholder="书籍 / 电子产品 / 混装"
+                  maxLength={80}
+                  list="box-category-suggestions"
+                />
+              </label>
               <label>存放位置（可选）<input value={boxForm.location} onChange={(event) => setBoxForm({ ...boxForm, location: event.target.value })} placeholder="储藏室 A 架" maxLength={160} /></label>
               <label>备注（可选）<textarea value={boxForm.notes} onChange={(event) => setBoxForm({ ...boxForm, notes: event.target.value })} placeholder="记录箱内分类、摆放方式或其他提示" maxLength={2_000} rows={4} /></label>
               <div className="modal-actions">
                 <button className="button ghost" type="button" onClick={() => setBoxDialog(null)}>取消</button>
                 <button className="button primary" type="submit" disabled={savingBox}>
                   {savingBox ? "正在保存…" : boxDialog.mode === "create" ? "创建并设为当前箱子" : "保存更改"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      <datalist id="box-category-suggestions">
+        {BOX_CATEGORY_SUGGESTIONS.map((category) => (
+          <option key={category} value={category} />
+        ))}
+      </datalist>
+      <datalist id="item-category-suggestions">
+        {ITEM_CATEGORY_SUGGESTIONS.map((category) => (
+          <option key={category} value={category} />
+        ))}
+      </datalist>
+
+      {itemDialog ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setItemDialog(null)}>
+          <section
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="item-dialog-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-head">
+              <div>
+                <p className="eyebrow">ITEM DETAILS</p>
+                <h2 id="item-dialog-title">编辑物品信息</h2>
+              </div>
+              <button className="icon-button" type="button" onClick={() => setItemDialog(null)} aria-label="关闭">
+                <X size={20} />
+              </button>
+            </div>
+            <form onSubmit={saveItem} className="modal-form">
+              {itemForm.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={itemForm.imageUrl} alt="" className="photo-thumb-preview" />
+              ) : null}
+              <input
+                id="item-photo-input"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                hidden
+                onChange={handleItemPhotoSelected}
+              />
+              <button
+                className="button secondary"
+                type="button"
+                disabled={uploadingItemPhoto}
+                onClick={() => document.getElementById("item-photo-input")?.click()}
+              >
+                <ImagePlus size={18} />
+                {uploadingItemPhoto ? "上传中…" : itemForm.imageUrl ? "更换照片" : "添加照片"}
+              </button>
+              <label>
+                名称
+                <input
+                  value={itemForm.title}
+                  onChange={(event) => setItemForm({ ...itemForm, title: event.target.value })}
+                  placeholder="填写后会从「待识别」移除"
+                  maxLength={500}
+                  autoFocus
+                />
+              </label>
+              <label>
+                作者（可选，多人用逗号分隔）
+                <input
+                  value={itemForm.authors}
+                  onChange={(event) => setItemForm({ ...itemForm, authors: event.target.value })}
+                  maxLength={500}
+                />
+              </label>
+              <label>
+                品牌（可选）
+                <input
+                  value={itemForm.brand}
+                  onChange={(event) => setItemForm({ ...itemForm, brand: event.target.value })}
+                  maxLength={200}
+                />
+              </label>
+              <label>
+                出版社（可选）
+                <input
+                  value={itemForm.publisher}
+                  onChange={(event) => setItemForm({ ...itemForm, publisher: event.target.value })}
+                  maxLength={300}
+                />
+              </label>
+              <label>
+                分类（可选）
+                <input
+                  value={itemForm.category}
+                  onChange={(event) => setItemForm({ ...itemForm, category: event.target.value })}
+                  maxLength={80}
+                  list="item-category-suggestions"
+                />
+              </label>
+              <label>
+                备注（可选）
+                <textarea
+                  value={itemForm.notes}
+                  onChange={(event) => setItemForm({ ...itemForm, notes: event.target.value })}
+                  maxLength={2_000}
+                  rows={3}
+                />
+              </label>
+              <div className="modal-actions">
+                <button className="button ghost" type="button" onClick={() => setItemDialog(null)}>
+                  取消
+                </button>
+                <button className="button primary" type="submit" disabled={savingItem}>
+                  {savingItem ? "正在保存…" : "保存更改"}
                 </button>
               </div>
             </form>
@@ -780,18 +1057,18 @@ function Overview({
         <div className="next-action-copy">
           <p className="eyebrow light">NEXT ACTION</p>
           {boxes.length === 0 ? (
-            <><h2>先建立第一个书箱</h2><p>箱号从 BOOK-001 开始。创建后就能连续扫码。</p><button className="button light-button" type="button" onClick={onCreateBox}><Plus size={18} /> 建立箱子</button></>
+            <><h2>先建立第一个箱子</h2><p>箱号从 BOX-001 开始。创建后就能连续扫码。</p><button className="button light-button" type="button" onClick={onCreateBox}><Plus size={18} /> 建立箱子</button></>
           ) : activeBox ? (
-            <><h2>继续装入 {activeBox.code}</h2><p>{activeBox.name || "当前书箱"}已经有 {activeBox.itemCount} 本。拿起下一本，扫码后再放进去。</p><button className="button light-button" type="button" onClick={() => onNavigate("scan")}><ScanLine size={18} /> 开始扫码 <ArrowRight size={17} /></button></>
+            <><h2>继续装入 {activeBox.code}</h2><p>{activeBox.name || "当前箱子"}已经有 {activeBox.itemCount} 件。拿起下一件，扫码或拍照后再放进去。</p><button className="button light-button" type="button" onClick={() => onNavigate("scan")}><ScanLine size={18} /> 开始扫码 <ArrowRight size={17} /></button></>
           ) : (
             <><h2>选择一个打开的箱子</h2><p>当前没有活动箱子，选择后才能扫码加入。</p><button className="button light-button" type="button" onClick={() => onNavigate("boxes")}><Boxes size={18} /> 选择箱子</button></>
           )}
         </div>
-        <div className="hero-box" aria-hidden="true"><Box size={105} strokeWidth={1.05} /><span>{activeBox?.code ?? "BOOK"}</span></div>
+        <div className="hero-box" aria-hidden="true"><Box size={105} strokeWidth={1.05} /><span>{activeBox?.code ?? "BOX"}</span></div>
       </div>
 
       <div className="stat-grid">
-        <StatCard icon={BookOpen} label="书籍总数" value={summary.totalItems} detail={`今天 +${summary.addedToday}`} />
+        <StatCard icon={BookOpen} label="物品总数" value={summary.totalItems} detail={`今天 +${summary.addedToday}`} />
         <StatCard icon={Boxes} label="全部箱子" value={summary.totalBoxes} detail={`${summary.openBoxes} 个装箱中`} />
         <StatCard icon={PackageCheck} label="已封箱" value={summary.sealedBoxes} detail="位置已锁定" />
         <StatCard icon={Archive} label="未装箱" value={summary.unassignedItems} detail={summary.unassignedItems ? "需要整理" : "全部归位"} warning={summary.unassignedItems > 0} />
@@ -803,15 +1080,15 @@ function Overview({
           <div className="recent-list">
             {items.slice(0, 5).map((item) => (
               <div className="recent-row" key={item.id}>
-                <div className="mini-cover">{item.coverUrl ? (// eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.coverUrl} alt="" />) : <BookOpen size={19} />}</div>
-                <div><strong>{item.title}</strong><span>{item.authors.join("、") || item.publisher || "信息待补充"}</span></div>
+                <div className="mini-cover">{item.imageUrl || item.coverUrl ? (// eslint-disable-next-line @next/next/no-img-element
+                  <img src={item.imageUrl || item.coverUrl} alt="" />) : <KindIcon kind={item.kind} size={19} />}</div>
+                <div><strong>{item.title || "待识别的物品"}</strong><span>{item.authors.join("、") || item.brand || item.publisher || "信息待补充"}</span></div>
                 <span className="location-tag">{item.boxCode ?? "未装箱"}</span>
                 <time>{dateLabel(item.createdAt)}</time>
               </div>
             ))}
           </div>
-        ) : <div className="mini-empty"><BookOpen size={28} /><p>录入第一本书后，它会出现在这里。</p></div>}
+        ) : <div className="mini-empty"><BookOpen size={28} /><p>录入第一件物品后，它会出现在这里。</p></div>}
       </div>
 
       <div className="panel open-boxes-panel">

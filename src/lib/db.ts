@@ -4,11 +4,12 @@ import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import { randomUUID } from "node:crypto";
 
 import type {
-  BookMetadata,
   BoxStatus,
   InventoryBox,
   InventoryItem,
   InventorySummary,
+  ItemKind,
+  ItemMetadata,
 } from "@/lib/types";
 
 type SqlClient = NeonQueryFunction<false, false>;
@@ -89,6 +90,13 @@ async function initializeSchema() {
     )
   `;
 
+  await sql`ALTER TABLE inventory_boxes ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT ''`;
+
+  await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS brand TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT ''`;
+  await sql`ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS needs_review BOOLEAN NOT NULL DEFAULT FALSE`;
+
   await sql`
     CREATE INDEX IF NOT EXISTS inventory_items_barcode_idx
       ON inventory_items (barcode)
@@ -100,6 +108,14 @@ async function initializeSchema() {
   await sql`
     CREATE INDEX IF NOT EXISTS inventory_items_created_at_idx
       ON inventory_items (created_at DESC)
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS inventory_items_category_idx
+      ON inventory_items (category)
+  `;
+  await sql`
+    CREATE INDEX IF NOT EXISTS inventory_items_needs_review_idx
+      ON inventory_items (needs_review) WHERE needs_review
   `;
 }
 
@@ -122,6 +138,11 @@ function asAuthors(value: unknown): string[] {
   return [];
 }
 
+function asItemKind(value: unknown): ItemKind {
+  const kind = asString(value);
+  return kind === "product" || kind === "unidentified" ? kind : "book";
+}
+
 function mapBox(row: Record<string, unknown>): InventoryBox {
   return {
     id: asString(row.id),
@@ -129,6 +150,7 @@ function mapBox(row: Record<string, unknown>): InventoryBox {
     name: asString(row.name),
     location: asString(row.location),
     notes: asString(row.notes),
+    category: asString(row.category),
     status: asString(row.status) as BoxStatus,
     itemCount: Number(row.item_count ?? 0),
     createdAt: new Date(asString(row.created_at)).toISOString(),
@@ -139,14 +161,18 @@ function mapBox(row: Record<string, unknown>): InventoryBox {
 function mapItem(row: Record<string, unknown>): InventoryItem {
   return {
     id: asString(row.id),
-    kind: "book",
+    kind: asItemKind(row.kind),
     barcode: asString(row.barcode),
     title: asString(row.title),
     authors: asAuthors(row.authors),
+    brand: asString(row.brand),
     publisher: asString(row.publisher),
     publishedDate: asString(row.published_date),
     coverUrl: asString(row.cover_url),
+    imageUrl: asString(row.image_url),
     language: asString(row.language),
+    category: asString(row.category),
+    needsReview: Boolean(row.needs_review),
     boxId: row.box_id ? asString(row.box_id) : null,
     boxCode: row.box_code ? asString(row.box_code) : null,
     boxName: row.box_name ? asString(row.box_name) : null,
@@ -178,18 +204,20 @@ export async function createBox(input: {
   name?: string;
   location?: string;
   notes?: string;
+  category?: string;
 }): Promise<InventoryBox> {
   await ensureSchema();
   const id = randomUUID();
   const sql = getClient();
   const rows = await sql`
-    INSERT INTO inventory_boxes (id, code, name, location, notes)
+    INSERT INTO inventory_boxes (id, code, name, location, notes, category)
     VALUES (
       ${id},
       ${input.code},
       ${input.name ?? ""},
       ${input.location ?? ""},
-      ${input.notes ?? ""}
+      ${input.notes ?? ""},
+      ${input.category ?? ""}
     )
     RETURNING *, 0::int AS item_count
   `;
@@ -204,6 +232,7 @@ export async function updateBox(input: {
   name?: string;
   location?: string;
   notes?: string;
+  category?: string;
 }): Promise<InventoryBox | null> {
   await ensureSchema();
   const rows = await getClient().query(
@@ -215,6 +244,7 @@ export async function updateBox(input: {
         name = COALESCE($4, name),
         location = COALESCE($5, location),
         notes = COALESCE($6, notes),
+        category = COALESCE($7, category),
         sealed_at = CASE
           WHEN $2 = 'sealed' THEN COALESCE(sealed_at, NOW())
           WHEN $2 = 'open' THEN NULL
@@ -233,6 +263,7 @@ export async function updateBox(input: {
       input.name ?? null,
       input.location ?? null,
       input.notes ?? null,
+      input.category ?? null,
     ],
   );
   if (!rows[0]) return null;
@@ -243,11 +274,14 @@ export async function updateBox(input: {
 export async function listItems(input: {
   query?: string;
   boxId?: string;
+  category?: string;
+  needsReview?: boolean;
   limit?: number;
 } = {}): Promise<InventoryItem[]> {
   await ensureSchema();
   const query = input.query?.trim() ?? "";
   const boxId = input.boxId?.trim() ?? "";
+  const category = input.category?.trim() ?? "";
   const requestedLimit = Number.isFinite(input.limit) ? Number(input.limit) : 500;
   const limit = Math.min(Math.max(requestedLimit, 1), 5_000);
   const rows = await getClient().query(
@@ -263,17 +297,21 @@ export async function listItems(input: {
           i.title ILIKE '%' || $1 || '%' OR
           i.barcode ILIKE '%' || $1 || '%' OR
           i.publisher ILIKE '%' || $1 || '%' OR
+          i.brand ILIKE '%' || $1 || '%' OR
           i.authors::text ILIKE '%' || $1 || '%')
         AND (NULLIF($2, '') IS NULL OR i.box_id = NULLIF($2, '')::uuid)
+        AND ($3 = '' OR i.category = $3)
+        AND ($4::boolean IS NULL OR i.needs_review = $4::boolean)
       ORDER BY i.created_at DESC
-      LIMIT $3
+      LIMIT $5
     `,
-    [query, boxId, limit],
+    [query, boxId, category, input.needsReview ?? null, limit],
   );
   return rows.map((row) => mapItem(row as Record<string, unknown>));
 }
 
 export async function findDuplicateCount(barcode: string) {
+  if (!barcode) return 0;
   await ensureSchema();
   const rows = await getClient()`
     SELECT COUNT(*)::int AS count
@@ -283,8 +321,11 @@ export async function findDuplicateCount(barcode: string) {
   return Number(rows[0]?.count ?? 0);
 }
 
-export async function createBookItem(input: {
-  metadata: BookMetadata;
+export async function createItem(input: {
+  kind: ItemKind;
+  metadata: ItemMetadata;
+  imageUrl?: string;
+  needsReview: boolean;
   boxId: string | null;
   notes?: string;
 }): Promise<InventoryItem> {
@@ -297,12 +338,12 @@ export async function createBookItem(input: {
     `
       WITH inserted AS (
         INSERT INTO inventory_items (
-          id, kind, barcode, title, authors, publisher, published_date,
-          cover_url, language, box_id, notes, source, metadata
+          id, kind, barcode, title, authors, brand, publisher, published_date,
+          cover_url, image_url, language, category, needs_review, box_id, notes, source, metadata
         )
         VALUES (
-          $1::uuid, 'book', $2, $3, $4::jsonb, $5, $6,
-          $7, $8, NULLIF($9, '')::uuid, $10, $11, $12::jsonb
+          $1::uuid, $2, $3, $4, $5::jsonb, $6, $7, $8,
+          $9, $10, $11, $12, $13, NULLIF($14, '')::uuid, $15, $16, $17::jsonb
         )
         RETURNING *
       )
@@ -312,13 +353,18 @@ export async function createBookItem(input: {
     `,
     [
       id,
-      input.metadata.isbn,
+      input.kind,
+      input.metadata.barcode,
       input.metadata.title,
       authorsJson,
+      input.metadata.brand,
       input.metadata.publisher,
       input.metadata.publishedDate,
       input.metadata.coverUrl,
+      input.imageUrl ?? "",
       input.metadata.language,
+      input.metadata.category,
+      input.needsReview,
       input.boxId ?? "",
       input.notes ?? "",
       input.metadata.source,
@@ -326,9 +372,62 @@ export async function createBookItem(input: {
     ],
   );
   await logEvent("item.created", "item", id, {
-    barcode: input.metadata.isbn,
+    barcode: input.metadata.barcode,
+    kind: input.kind,
     boxId: input.boxId,
   });
+  return mapItem(rows[0] as Record<string, unknown>);
+}
+
+export async function updateItem(input: {
+  id: string;
+  title?: string;
+  authors?: string[];
+  brand?: string;
+  publisher?: string;
+  category?: string;
+  notes?: string;
+  imageUrl?: string;
+}): Promise<InventoryItem | null> {
+  await ensureSchema();
+  const authorsJson = input.authors ? JSON.stringify(input.authors) : null;
+  const rows = await getClient().query(
+    `
+      WITH updated AS (
+        UPDATE inventory_items
+        SET
+          title = COALESCE($2, title),
+          authors = COALESCE($3::jsonb, authors),
+          brand = COALESCE($4, brand),
+          publisher = COALESCE($5, publisher),
+          category = COALESCE($6, category),
+          notes = COALESCE($7, notes),
+          image_url = COALESCE($8, image_url),
+          needs_review = CASE
+            WHEN $2 IS NOT NULL THEN (TRIM($2) = '')
+            ELSE needs_review
+          END,
+          updated_at = NOW()
+        WHERE id = $1::uuid
+        RETURNING *
+      )
+      SELECT updated.*, b.code AS box_code, b.name AS box_name
+      FROM updated
+      LEFT JOIN inventory_boxes b ON b.id = updated.box_id
+    `,
+    [
+      input.id,
+      input.title ?? null,
+      authorsJson,
+      input.brand ?? null,
+      input.publisher ?? null,
+      input.category ?? null,
+      input.notes ?? null,
+      input.imageUrl ?? null,
+    ],
+  );
+  if (!rows[0]) return null;
+  await logEvent("item.updated", "item", input.id, input);
   return mapItem(rows[0] as Record<string, unknown>);
 }
 

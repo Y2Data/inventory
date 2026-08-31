@@ -12,6 +12,7 @@ const CreateBoxSchema = z.object({
   name: z.string().max(120).optional(),
   location: z.string().max(160).optional(),
   notes: z.string().max(2_000).optional(),
+  category: z.string().max(80).optional(),
 });
 
 const UpdateBoxSchema = z.object({
@@ -21,6 +22,7 @@ const UpdateBoxSchema = z.object({
   name: z.string().max(120).optional(),
   location: z.string().max(160).optional(),
   notes: z.string().max(2_000).optional(),
+  category: z.string().max(80).optional(),
 });
 
 function normalizeBoxCode(value: string) {

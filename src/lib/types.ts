@@ -6,34 +6,51 @@ export interface InventoryBox {
   name: string;
   location: string;
   notes: string;
+  category: string;
   status: BoxStatus;
   itemCount: number;
   createdAt: string;
   sealedAt: string | null;
 }
 
-export interface BookMetadata {
-  isbn: string;
+export type ItemKind = "book" | "product" | "unidentified";
+
+export type MetadataSource =
+  | "openbd"
+  | "google-books"
+  | "open-library"
+  | "open-food-facts"
+  | "manual"
+  | "photo";
+
+export interface ItemMetadata {
+  barcode: string;
   title: string;
   authors: string[];
+  brand: string;
   publisher: string;
   publishedDate: string;
   coverUrl: string;
   language: string;
-  source: "openbd" | "google-books" | "open-library" | "manual";
+  category: string;
+  source: MetadataSource;
   raw?: Record<string, unknown>;
 }
 
 export interface InventoryItem {
   id: string;
-  kind: "book";
+  kind: ItemKind;
   barcode: string;
   title: string;
   authors: string[];
+  brand: string;
   publisher: string;
   publishedDate: string;
   coverUrl: string;
+  imageUrl: string;
   language: string;
+  category: string;
+  needsReview: boolean;
   boxId: string | null;
   boxCode: string | null;
   boxName: string | null;
@@ -56,5 +73,5 @@ export interface ApiError {
   error: string;
   message?: string;
   existingCount?: number;
-  metadata?: BookMetadata;
+  metadata?: ItemMetadata;
 }

@@ -2,21 +2,34 @@
 
 import {
   AlertTriangle,
-  BookOpen,
   Camera,
   CameraOff,
   Check,
+  CircleHelp,
+  ImagePlus,
   Keyboard,
+  Package,
   ScanLine,
+  BookOpen,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { BrowserMultiFormatReader, type IScannerControls } from "@zxing/browser";
+import { upload } from "@vercel/blob/client";
 
+import { classifyBarcode } from "@/lib/barcode-format";
 import type {
   ApiError,
-  BookMetadata,
   InventoryBox,
   InventoryItem,
+  ItemKind,
+  ItemMetadata,
 } from "@/lib/types";
 
 interface ScannerPanelProps {
@@ -28,16 +41,40 @@ interface ScannerPanelProps {
 }
 
 interface DuplicateCandidate {
-  isbn: string;
-  metadata: BookMetadata;
+  barcode: string;
+  metadata: ItemMetadata;
   existingCount: number;
 }
 
-interface ManualCandidate {
-  isbn: string;
+interface ProductCandidate {
+  barcode: string;
+  title: string;
+  brand: string;
+  category: string;
+  coverUrl: string;
+}
+
+interface UnmatchedCandidate {
+  barcode: string;
+  kind: ItemKind;
   title: string;
   authors: string;
+  brand: string;
   publisher: string;
+  category: string;
+  imageUrl: string;
+}
+
+const KIND_LABEL: Record<ItemKind, string> = {
+  book: "书籍",
+  product: "物品",
+  unidentified: "待识别",
+};
+
+function KindIcon({ kind, size }: { kind: ItemKind; size: number }) {
+  if (kind === "book") return <BookOpen size={size} />;
+  if (kind === "product") return <Package size={size} />;
+  return <CircleHelp size={size} />;
 }
 
 export function ScannerPanel({
@@ -54,13 +91,16 @@ export function ScannerPanel({
   const lastCodeRef = useRef({ code: "", at: 0 });
   const activeBoxRef = useRef(activeBoxId);
   const boxesRef = useRef(boxes);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const [scanning, setScanning] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [cameraError, setCameraError] = useState("");
-  const [manualIsbn, setManualIsbn] = useState("");
+  const [manualBarcode, setManualBarcode] = useState("");
   const [lastAdded, setLastAdded] = useState<InventoryItem | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicateCandidate | null>(null);
-  const [manualCandidate, setManualCandidate] = useState<ManualCandidate | null>(null);
+  const [productCandidate, setProductCandidate] = useState<ProductCandidate | null>(null);
+  const [unmatchedCandidate, setUnmatchedCandidate] = useState<UnmatchedCandidate | null>(null);
 
   useEffect(() => {
     activeBoxRef.current = activeBoxId;
@@ -70,19 +110,23 @@ export function ScannerPanel({
     boxesRef.current = boxes;
   }, [boxes]);
 
-  const addBook = useCallback(
+  const addItem = useCallback(
     async (
-      isbn: string,
+      barcode: string,
       options: {
         allowDuplicate?: boolean;
+        expectedKind?: ItemKind;
         manualMetadata?: {
           title: string;
           authors: string[];
+          brand: string;
           publisher: string;
           publishedDate: string;
           coverUrl: string;
           language: string;
+          category: string;
         };
+        imageUrl?: string;
       } = {},
     ) => {
       const boxId = activeBoxRef.current;
@@ -98,10 +142,11 @@ export function ScannerPanel({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            barcode: isbn,
+            barcode,
             boxId,
             allowDuplicate: options.allowDuplicate,
             manualMetadata: options.manualMetadata,
+            imageUrl: options.imageUrl,
           }),
         });
         const payload = (await response.json()) as
@@ -115,15 +160,24 @@ export function ScannerPanel({
         if (response.status === 409 && "error" in payload && payload.error === "duplicate") {
           setScanning(false);
           setDuplicate({
-            isbn,
-            metadata: payload.metadata as BookMetadata,
+            barcode,
+            metadata: payload.metadata as ItemMetadata,
             existingCount: payload.existingCount ?? 1,
           });
           return;
         }
         if (response.status === 422) {
           setScanning(false);
-          setManualCandidate({ isbn, title: "", authors: "", publisher: "" });
+          setUnmatchedCandidate({
+            barcode,
+            kind: options.expectedKind ?? "unidentified",
+            title: "",
+            authors: "",
+            brand: "",
+            publisher: "",
+            category: "",
+            imageUrl: "",
+          });
           return;
         }
         if (!response.ok || !("item" in payload)) {
@@ -135,14 +189,15 @@ export function ScannerPanel({
         }
 
         setDuplicate(null);
-        setManualCandidate(null);
-        setManualIsbn("");
+        setProductCandidate(null);
+        setUnmatchedCandidate(null);
+        setManualBarcode("");
         setLastAdded(payload.item);
         onItemAdded(payload.item);
         navigator.vibrate?.(80);
-        onNotice(`已加入：${payload.item.title}`, "success");
+        onNotice(`已加入：${payload.item.title || "待识别的物品"}`, "success");
       } catch {
-        onNotice("网络连接失败，请再扫一次", "error");
+        onNotice("网络连接失败，请再试一次", "error");
       } finally {
         busyRef.current = false;
         setProcessing(false);
@@ -153,11 +208,67 @@ export function ScannerPanel({
       onNotice,
       setDuplicate,
       setLastAdded,
-      setManualCandidate,
-      setManualIsbn,
+      setManualBarcode,
       setProcessing,
+      setProductCandidate,
       setScanning,
+      setUnmatchedCandidate,
     ],
+  );
+
+  const previewProduct = useCallback(
+    async (barcode: string) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setProcessing(true);
+      try {
+        const response = await fetch(`/api/barcode?code=${encodeURIComponent(barcode)}`);
+        if (response.status === 401) {
+          window.location.replace("/login");
+          return;
+        }
+        setScanning(false);
+        const payload = (await response.json()) as
+          | { kind: string; metadata: ItemMetadata }
+          | ApiError;
+        if (response.ok && "kind" in payload) {
+          setProductCandidate({
+            barcode,
+            title: payload.metadata.title,
+            brand: payload.metadata.brand,
+            category: payload.metadata.category,
+            coverUrl: payload.metadata.coverUrl,
+          });
+        } else {
+          setUnmatchedCandidate({
+            barcode,
+            kind: "product",
+            title: "",
+            authors: "",
+            brand: "",
+            publisher: "",
+            category: "",
+            imageUrl: "",
+          });
+        }
+      } catch {
+        setScanning(false);
+        setUnmatchedCandidate({
+          barcode,
+          kind: "product",
+          title: "",
+          authors: "",
+          brand: "",
+          publisher: "",
+          category: "",
+          imageUrl: "",
+        });
+      } finally {
+        busyRef.current = false;
+        setProcessing(false);
+      }
+    },
+    [setProcessing, setProductCandidate, setScanning, setUnmatchedCandidate],
   );
 
   const handleDecodedCode = useCallback(
@@ -183,14 +294,29 @@ export function ScannerPanel({
         return;
       }
 
-      const isbn = code.replace(/[^0-9Xx]/g, "").toUpperCase();
-      if (!((isbn.length === 13 && /^(978|979)/.test(isbn)) || isbn.length === 10)) {
-        onNotice("扫到的不是 ISBN，请对准书背上方条码", "error");
+      const { kind, normalized } = classifyBarcode(code);
+      if (kind === "isbn") {
+        void addItem(normalized, { expectedKind: "book" });
         return;
       }
-      void addBook(isbn);
+      if (kind === "product") {
+        void previewProduct(normalized);
+        return;
+      }
+
+      setScanning(false);
+      setUnmatchedCandidate({
+        barcode: normalized,
+        kind: "unidentified",
+        title: "",
+        authors: "",
+        brand: "",
+        publisher: "",
+        category: "",
+        imageUrl: "",
+      });
     },
-    [addBook, onActiveBoxChange, onNotice],
+    [addItem, onActiveBoxChange, onNotice, previewProduct, setScanning, setUnmatchedCandidate],
   );
 
   useEffect(() => {
@@ -227,7 +353,7 @@ export function ScannerPanel({
         setCameraError(
           error instanceof Error && /permission|notallowed/i.test(error.message)
             ? "请允许浏览器使用相机，然后重新打开扫码。"
-            : "无法启动相机。你仍然可以手动输入 ISBN。",
+            : "无法启动相机。你仍然可以手动输入条码或直接拍照。",
         );
       });
 
@@ -238,27 +364,82 @@ export function ScannerPanel({
     };
   }, [handleDecodedCode, scanning]);
 
-  function submitManualIsbn(event: FormEvent<HTMLFormElement>) {
+  function submitManualBarcode(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    handleDecodedCode(manualIsbn);
+    handleDecodedCode(manualBarcode);
   }
 
-  function submitManualMetadata(event: FormEvent<HTMLFormElement>) {
+  function openPhotoOnlyEntry() {
+    setScanning(false);
+    setUnmatchedCandidate({
+      barcode: "",
+      kind: "unidentified",
+      title: "",
+      authors: "",
+      brand: "",
+      publisher: "",
+      category: "",
+      imageUrl: "",
+    });
+  }
+
+  function confirmProductCandidate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!manualCandidate?.title.trim()) return;
-    void addBook(manualCandidate.isbn, {
+    if (!productCandidate || !productCandidate.title.trim()) return;
+    void addItem(productCandidate.barcode, {
       manualMetadata: {
-        title: manualCandidate.title.trim(),
-        authors: manualCandidate.authors
+        title: productCandidate.title.trim(),
+        authors: [],
+        brand: productCandidate.brand.trim(),
+        publisher: "",
+        publishedDate: "",
+        coverUrl: productCandidate.coverUrl,
+        language: "",
+        category: productCandidate.category.trim(),
+      },
+    });
+  }
+
+  function submitUnmatchedCandidate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!unmatchedCandidate) return;
+    if (!unmatchedCandidate.title.trim() && !unmatchedCandidate.imageUrl) return;
+    void addItem(unmatchedCandidate.barcode, {
+      manualMetadata: {
+        title: unmatchedCandidate.title.trim(),
+        authors: unmatchedCandidate.authors
           .split(/[;,，；]/)
           .map((value) => value.trim())
           .filter(Boolean),
-        publisher: manualCandidate.publisher.trim(),
+        brand: unmatchedCandidate.brand.trim(),
+        publisher: unmatchedCandidate.publisher.trim(),
         publishedDate: "",
         coverUrl: "",
         language: "",
+        category: unmatchedCandidate.category.trim(),
       },
+      imageUrl: unmatchedCandidate.imageUrl || undefined,
     });
+  }
+
+  async function handlePhotoSelected(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !unmatchedCandidate) return;
+    setUploadingPhoto(true);
+    try {
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/blob/upload",
+      });
+      setUnmatchedCandidate((current) =>
+        current ? { ...current, imageUrl: blob.url } : current,
+      );
+    } catch {
+      onNotice("照片上传失败，请重试", "error");
+    } finally {
+      setUploadingPhoto(false);
+    }
   }
 
   return (
@@ -284,7 +465,7 @@ export function ScannerPanel({
           <option value="">选择箱子…</option>
           {openBoxes.map((box) => (
             <option key={box.id} value={box.id}>
-              {box.code} · {box.name || "未命名"}（{box.itemCount} 本）
+              {box.code} · {box.name || "未命名"}（{box.itemCount} 件）
             </option>
           ))}
         </select>
@@ -309,16 +490,26 @@ export function ScannerPanel({
               <div className="scan-icon">
                 <ScanLine size={38} strokeWidth={1.5} />
               </div>
-              <strong>对准书背上方的 ISBN 条码</strong>
+              <strong>对准条码，没有条码时可以直接拍照</strong>
               <p>识别成功后会直接加入当前箱子。</p>
-              <button
-                className="button primary"
-                type="button"
-                onClick={() => setScanning(true)}
-                disabled={!activeBoxId || processing}
-              >
-                <Camera size={18} /> 打开相机
-              </button>
+              <div className="button-row">
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => setScanning(true)}
+                  disabled={!activeBoxId || processing}
+                >
+                  <Camera size={18} /> 打开相机
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={openPhotoOnlyEntry}
+                  disabled={!activeBoxId || processing}
+                >
+                  <ImagePlus size={18} /> 没有条码 / 直接拍照
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -328,22 +519,22 @@ export function ScannerPanel({
         <div className="manual-divider">
           <span>或手动输入</span>
         </div>
-        <form className="isbn-form" onSubmit={submitManualIsbn}>
+        <form className="isbn-form" onSubmit={submitManualBarcode}>
           <div className="input-with-icon">
             <Keyboard size={18} />
             <input
               inputMode="numeric"
               autoComplete="off"
-              value={manualIsbn}
-              onChange={(event) => setManualIsbn(event.target.value)}
-              placeholder="978… / ISBN-10"
-              aria-label="ISBN"
+              value={manualBarcode}
+              onChange={(event) => setManualBarcode(event.target.value)}
+              placeholder="条码 / ISBN"
+              aria-label="条码"
             />
           </div>
           <button
             className="button secondary"
             type="submit"
-            disabled={!manualIsbn.trim() || !activeBoxId || processing}
+            disabled={!manualBarcode.trim() || !activeBoxId || processing}
           >
             添加
           </button>
@@ -357,14 +548,14 @@ export function ScannerPanel({
             <div>
               <h3>可能重复扫描</h3>
               <p>
-                库存中已有 {duplicate.existingCount} 本《{duplicate.metadata.title}》。
+                库存中已有 {duplicate.existingCount} 件《{duplicate.metadata.title || "该物品"}》。
               </p>
             </div>
             <div className="button-row">
               <button
                 className="button primary"
                 type="button"
-                onClick={() => addBook(duplicate.isbn, { allowDuplicate: true })}
+                onClick={() => addItem(duplicate.barcode, { allowDuplicate: true })}
               >
                 仍然添加
               </button>
@@ -379,52 +570,177 @@ export function ScannerPanel({
           </div>
         ) : null}
 
-        {manualCandidate ? (
-          <form className="panel manual-card" onSubmit={submitManualMetadata}>
+        {productCandidate ? (
+          <form className="panel manual-card" onSubmit={confirmProductCandidate}>
             <div className="panel-heading compact">
               <div>
-                <p className="eyebrow">NOT FOUND</p>
-                <h3>手动补充书名</h3>
+                <p className="eyebrow">FOUND · OPEN FOOD FACTS</p>
+                <h3>确认物品信息</h3>
               </div>
             </div>
-            <p className="muted small">ISBN {manualCandidate.isbn}</p>
+            <p className="muted small">条码 {productCandidate.barcode}</p>
+            {productCandidate.coverUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={productCandidate.coverUrl}
+                alt=""
+                style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8 }}
+              />
+            ) : null}
             <label>
-              书名
+              名称
               <input
-                value={manualCandidate.title}
+                value={productCandidate.title}
                 onChange={(event) =>
-                  setManualCandidate({ ...manualCandidate, title: event.target.value })
+                  setProductCandidate({ ...productCandidate, title: event.target.value })
                 }
                 required
                 autoFocus
               />
             </label>
             <label>
-              作者（多人用逗号分隔）
+              品牌
               <input
-                value={manualCandidate.authors}
+                value={productCandidate.brand}
                 onChange={(event) =>
-                  setManualCandidate({ ...manualCandidate, authors: event.target.value })
+                  setProductCandidate({ ...productCandidate, brand: event.target.value })
                 }
               />
             </label>
             <label>
-              出版社
+              分类
               <input
-                value={manualCandidate.publisher}
+                value={productCandidate.category}
                 onChange={(event) =>
-                  setManualCandidate({ ...manualCandidate, publisher: event.target.value })
+                  setProductCandidate({ ...productCandidate, category: event.target.value })
                 }
               />
             </label>
             <div className="button-row">
               <button className="button primary" type="submit" disabled={processing}>
+                确认添加
+              </button>
+              <button
+                className="button ghost"
+                type="button"
+                onClick={() => setProductCandidate(null)}
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        ) : null}
+
+        {unmatchedCandidate ? (
+          <form className="panel manual-card" onSubmit={submitUnmatchedCandidate}>
+            <div className="panel-heading compact">
+              <div>
+                <p className="eyebrow">NOT FOUND</p>
+                <h3>手动补充信息或拍照留存</h3>
+              </div>
+            </div>
+            {unmatchedCandidate.barcode ? (
+              <p className="muted small">条码 {unmatchedCandidate.barcode}</p>
+            ) : (
+              <p className="muted small">没有条码</p>
+            )}
+
+            {unmatchedCandidate.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={unmatchedCandidate.imageUrl}
+                alt=""
+                style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 8 }}
+              />
+            ) : null}
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              hidden
+              onChange={handlePhotoSelected}
+            />
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => photoInputRef.current?.click()}
+              disabled={uploadingPhoto}
+            >
+              <ImagePlus size={18} />
+              {uploadingPhoto
+                ? "上传中…"
+                : unmatchedCandidate.imageUrl
+                  ? "更换照片"
+                  : "拍照 / 选择照片"}
+            </button>
+
+            <label>
+              名称
+              <input
+                value={unmatchedCandidate.title}
+                onChange={(event) =>
+                  setUnmatchedCandidate({ ...unmatchedCandidate, title: event.target.value })
+                }
+                autoFocus
+              />
+            </label>
+            {unmatchedCandidate.kind === "book" ? (
+              <>
+                <label>
+                  作者（多人用逗号分隔）
+                  <input
+                    value={unmatchedCandidate.authors}
+                    onChange={(event) =>
+                      setUnmatchedCandidate({ ...unmatchedCandidate, authors: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  出版社
+                  <input
+                    value={unmatchedCandidate.publisher}
+                    onChange={(event) =>
+                      setUnmatchedCandidate({ ...unmatchedCandidate, publisher: event.target.value })
+                    }
+                  />
+                </label>
+              </>
+            ) : (
+              <label>
+                品牌
+                <input
+                  value={unmatchedCandidate.brand}
+                  onChange={(event) =>
+                    setUnmatchedCandidate({ ...unmatchedCandidate, brand: event.target.value })
+                  }
+                />
+              </label>
+            )}
+            <label>
+              分类
+              <input
+                value={unmatchedCandidate.category}
+                onChange={(event) =>
+                  setUnmatchedCandidate({ ...unmatchedCandidate, category: event.target.value })
+                }
+              />
+            </label>
+            <div className="button-row">
+              <button
+                className="button primary"
+                type="submit"
+                disabled={
+                  processing ||
+                  (!unmatchedCandidate.title.trim() && !unmatchedCandidate.imageUrl)
+                }
+              >
                 保存
               </button>
               <button
                 className="button ghost"
                 type="button"
-                onClick={() => setManualCandidate(null)}
+                onClick={() => setUnmatchedCandidate(null)}
               >
                 取消
               </button>
@@ -438,18 +754,19 @@ export function ScannerPanel({
               <Check size={20} />
             </div>
             <div className="book-thumb">
-              {lastAdded.coverUrl ? (
+              {lastAdded.imageUrl || lastAdded.coverUrl ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={lastAdded.coverUrl} alt="" />
+                <img src={lastAdded.imageUrl || lastAdded.coverUrl} alt="" />
               ) : (
-                <BookOpen size={24} />
+                <KindIcon kind={lastAdded.kind} size={24} />
               )}
             </div>
             <div>
-              <p className="eyebrow">LAST ADDED</p>
-              <h3>{lastAdded.title}</h3>
+              <p className="eyebrow">LAST ADDED · {KIND_LABEL[lastAdded.kind]}</p>
+              <h3>{lastAdded.title || "待识别的物品"}</h3>
               <p className="muted small">
-                {lastAdded.authors.join("、") || "作者未知"} · {lastAdded.boxCode}
+                {lastAdded.authors.join("、") || lastAdded.brand || "信息待补充"} ·{" "}
+                {lastAdded.boxCode}
               </p>
             </div>
           </div>
